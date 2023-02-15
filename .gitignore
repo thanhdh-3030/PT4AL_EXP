@@ -9,3 +9,6 @@
 /loss
 /DATA
 /models/__pycache__
+*.pth
+/wandb
+/data

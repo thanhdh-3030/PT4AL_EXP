@@ -1,6 +1,6 @@
 *.txt
 *.png
-
+*.pth
 /checkpoint
 /checkpoint1
 /checkpoint_int
@@ -9,3 +9,5 @@
 /loss
 /DATA
 /models/__pycache__
+data/
+wandb/

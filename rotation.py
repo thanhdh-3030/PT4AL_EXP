@@ -14,7 +14,7 @@ import random
 
 from models import *
 from loader import Loader, RotationLoader
-from utils import progress_bar
+from utils.utils import progress_bar
 import numpy as np
 
 

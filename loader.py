@@ -55,7 +55,9 @@ class Loader2(Dataset):
             self.img_path = path_list
         else:
             if path_list is None:
-                self.img_path = glob.glob('./DATA/train/*/*') # for loss extraction
+                # self.img_path = glob.glob('./DATA/train/*/*') # for loss extraction
+                self.img_path = glob.glob('./DATA/test/*/*') # for loss extraction
+
             else:
                 self.img_path = path_list
     def __len__(self):

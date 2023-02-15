@@ -23,7 +23,7 @@ parser.add_argument('--resume', '-r', action='store_true',
                     help='resume from checkpoint')
 args = parser.parse_args()
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
@@ -208,7 +208,8 @@ if __name__ == '__main__':
     labeled = []
         
     CYCLES = 10
-    for cycle in range(CYCLES):
+    orders=[5,0,1,2,3,4,6,7,8,9]
+    for ix,cycle in enumerate(orders):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(net.parameters(), lr=0.1,momentum=0.9, weight_decay=5e-4)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[160])
@@ -220,24 +221,27 @@ if __name__ == '__main__':
         with open(f'./loss/batch_{cycle}.txt', 'r') as f:
             samples = f.readlines()
             
-        if cycle > 0:
-            print('>> Getting previous checkpoint')
-            # prevnet = ResNet18().to(device)
-            # prevnet = torch.nn.DataParallel(prevnet)
-            checkpoint = torch.load(f'./checkpoint/main_{cycle-1}.pth')
-            net.load_state_dict(checkpoint['net'])
 
-            # sampling
-            sample1k = get_plabels2(net, samples, cycle)
-        else:
+        if cycle==5:
+            with open(f'./loss/batch_5.txt','r') as f:
+                samples=f.readlines()
             # first iteration: sample 1k at even intervals
             samples = np.array(samples)
             sample1k = samples[[j*5 for j in range(1000)]]
         # add 1k samples to labeled set
+        else:
+            print('>> Getting previous checkpoint')
+            # prevnet = ResNet18().to(device)
+            # prevnet = torch.nn.DataParallel(prevnet)
+            checkpoint = torch.load(f'./checkpoint/main_{orders[ix-1]}.pth')
+            net.load_state_dict(checkpoint['net'])
+
+            # sampling
+            sample1k = get_plabels2(net, samples, cycle)
         labeled.extend(sample1k)
         print(f'>> Labeled length: {len(labeled)}')
         trainset = Loader2(is_train=True, transform=transform_train, path_list=labeled)
-        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=2)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=2,drop_last=False)
 
         for epoch in range(200):
             train(net, criterion, optimizer, epoch, trainloader)

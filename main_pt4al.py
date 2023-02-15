@@ -13,7 +13,7 @@ import argparse
 import random
 
 from models import *
-from utils import progress_bar
+from utils.utils import progress_bar
 from loader import Loader, Loader2, Loader_Cold
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')

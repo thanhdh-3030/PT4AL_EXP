@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from pathlib import Path
+from packaging import version
 
 import torchvision
 import torchvision.transforms as transforms
@@ -12,21 +14,47 @@ import os
 import argparse
 import random
 import numpy as np
+from PIL import Image
 
 from models import *
 from loader import Loader, Loader2
 from utils.utils import progress_bar
-
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
+from torchvision.datasets import Cityscapes
+from models.deeplabv1 import DeepLabV1
+from utils.utils import loss_calc
+# train_dir_img = Path('./DATA/train/')
+# train_dir_mask = Path('./DATA/train/')
+# val_dir_img=Path('./DATA/test')
+# val_dir_mask=Path('./DATA/test')
+from active_cityscape import ActiveCityscapes
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+cityspace_dir='/home/dang.hong.thanh/datasets/Cityspaces'
+parser = argparse.ArgumentParser(description='PyTorch Cityscapes Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true',
                     help='resume from checkpoint')
 args = parser.parse_args()
-
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
-
+LEARNING_RATE = 2.5e-3
+MOMENTUM=0.9
+# def resize_labels(labels, size):
+#     """
+#     Downsample labels for 0.5x and 0.75x logits by nearest interpolation.
+#     Other nearest methods result in misaligned labels.
+#     -> F.interpolate(labels, shape, mode='nearest')
+#     -> cv2.resize(labels, shape, interpolation=cv2.INTER_NEAREST)
+#     """
+#     new_labels = []
+#     for label in labels:
+#         # label = label.float().numpy()
+#         label = label.cpu().float().numpy().squeeze(0)
+#         label = Image.fromarray(label).resize(size, resample=Image.NEAREST)
+#         new_labels.append(np.asarray(label))
+#     new_labels = torch.LongTensor(new_labels)
+#     return new_labels
 # Data
 print('==> Preparing data..')
 transform_train = transforms.Compose([
@@ -41,23 +69,35 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-# testset = Loader(is_train=False, transform=transform_test)
-testset = Loader2(is_train=False, transform=transform_test)
-testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
+# # testset = Loader(is_train=False, transform=transform_test)
+# testset = Loader2(is_train=False, transform=transform_test)
+# testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
-classes = ('plane', 'car', 'bird', 'cat', 'deer',
-           'dog', 'frog', 'horse', 'ship', 'truck')
+# classes = ('plane', 'car', 'bird', 'cat', 'deer',
+#            'dog', 'frog', 'horse', 'ship', 'truck')
+image_transform=transforms.Compose([
+    # you can add other transformations in this list
+    transforms.ToTensor()])
+target_transform = transforms.Compose([
+    transforms.PILToTensor()
+])
+# train_dataset= Cityscapes(root=cityspace_dir, split="train",mode="fine",target_type='semantic',transform=seg_transform,target_transform=seg_transform)
+val_dataset= Cityscapes(root=cityspace_dir, split="val",mode="fine",target_type='semantic',transform=image_transform,target_transform=target_transform)
 
 # Model
 print('==> Building model..')
-net = ResNet18()
-
+# net = ResNet18()
+net=DeepLabV1(n_classes=34, n_blocks=[3, 4, 23, 3])
 net = net.to(device)
 # if device == 'cuda':
 #     net = torch.nn.DataParallel(net)
 #     cudnn.benchmark = True
-
+if version.parse(torch.__version__) >= version.parse('0.4.0'):
+    interp = nn.Upsample(size=(1024, 2048), mode='bilinear', align_corners=True)
+else:
+    interp = nn.Upsample(size=(1024, 2048), mode='bilinear')
 # Training
+testloader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2,drop_last=False)
 def train(net, criterion, optimizer, epoch, trainloader):
     print('\nEpoch: %d' % epoch)
     net.train()
@@ -68,15 +108,25 @@ def train(net, criterion, optimizer, epoch, trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = net(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-
+        outputs=F.normalize(outputs,dim=1)
+        outputs=F.softmax(outputs,dim=1)
+        outputs=interp(outputs)
+        # print(targets.min(),targets.max())
+        loss = loss_calc(outputs, targets,gpu='cuda:0')
+        # loss.backward()
+        scaler.scale(loss).backward()
+        # optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         train_loss += loss.item()
         _, predicted = outputs.max(1)
-        total += targets.size(0)
+        # total += targets.size(0)
+        total +=targets.size(0)*targets.size(-1)*targets.size(-2)
+        # squeeze on class channel
+        targets=targets.squeeze(1)
         correct += predicted.eq(targets).sum().item()
-
+        # Normalize correct
+        # correct=correct/(targets.size(-1)*targets.size(-2))
         progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                      % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
@@ -87,14 +137,19 @@ def test(net, criterion, epoch, cycle):
     correct = 0
     total = 0
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(testloader):
+        for batch_idx, (inputs, targets,_) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
-            loss = criterion(outputs, targets)
+            outputs=interp(outputs)
+        # print(targets.min(),targets.max())
+            loss = loss_calc(outputs, targets,gpu='cuda:0')
+            # loss = criterion(outputs, targets)
 
             test_loss += loss.item()
             _, predicted = outputs.max(1)
-            total += targets.size(0)
+            # total += targets.size(0)
+            total +=targets.size(0)*targets.size(-1)*targets.size(-2)
+            targets=targets.squeeze(1)
             correct += predicted.eq(targets).sum().item()
 
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
@@ -109,9 +164,9 @@ def test(net, criterion, epoch, cycle):
             'acc': acc,
             'epoch': epoch,
         }
-        if not os.path.isdir('checkpoint'):
-            os.mkdir('checkpoint')
-        torch.save(state, f'./checkpoint/main_{cycle}.pth')
+        if not os.path.isdir('checkpoint_seg'):
+            os.mkdir('checkpoint_seg')
+        torch.save(state, f'./checkpoint_seg/main_{cycle}.pth')
         best_acc = acc
 
 # class-balanced sampling (pseudo labeling)
@@ -151,7 +206,7 @@ def get_plabels(net, samples, cycle):
     return sample1k
 
 # confidence sampling (pseudo labeling)
-## return 1k samples w/ lowest top1 score
+# return 1k samples w/ lowest top1 score
 def get_plabels2(net, samples, cycle):
     # dictionary with 10 keys as class labels
     class_dict = {}
@@ -178,6 +233,42 @@ def get_plabels2(net, samples, cycle):
     samples = np.array(samples)
     return samples[idx[:1000]]
 
+#
+def get_seg_plabels_confidence(net, samples, cycle):
+    # dictionary with 10 keys as class labels
+    # class_dict = {}
+    # [class_dict.setdefault(x,[]) for x in range(10)]
+
+    sample1k = []
+    subset = ActiveCityscapes(cityspace_dir,transform=image_transform,target_transform=target_transform,image_files=samples)
+    ploader = torch.utils.data.DataLoader(subset, batch_size=1, shuffle=False, num_workers=2)
+
+    uncertainty_scores = []
+    net.eval()
+    with torch.no_grad():
+        for idx, (inputs, targets) in enumerate(ploader):
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = net(inputs)
+            outputs=interp(outputs)
+            # scores, predicted = outputs.max(1)
+            # save top1 confidence score 
+            outputs = F.normalize(outputs, dim=1)
+            probs = F.softmax(outputs, dim=1)
+            # top1_scores.append(probs[0][predicted.item()])
+            # top1_scores.append(probs[0][predicted.item()].cpu().item())
+            # max_probs,indices=torch.max(probs,dim=1)
+            # # print(outputs.size())
+            # print(max_probs)
+            # print(indices)
+            measures=torch.logical_and(probs>=0.35,probs<=0.75)
+    
+            uncertainty_score=torch.sum(measures,dim=(1,2,3))
+            # print(uncertainty_score)
+            uncertainty_scores.append(uncertainty_score.cpu().item())
+            # progress_bar(idx, len(ploader))
+    idx = np.argsort(uncertainty_scores)
+    samples = np.array(samples)
+    return samples[idx[:100]]
 # entropy sampling
 def get_plabels3(net, samples, cycle):
     sample1k = []
@@ -217,31 +308,32 @@ if __name__ == '__main__':
         print('Cycle ', cycle)
 
         # open 5k batch (sorted low->high)
-        with open(f'./loss/batch_{cycle}.txt', 'r') as f:
+        with open(f'./loss_seg/batch_{cycle}.txt', 'r') as f:
             samples = f.readlines()
-            
+        samples=[sample[:-1] for sample in samples] # remove newline character
         if cycle > 0:
             print('>> Getting previous checkpoint')
             # prevnet = ResNet18().to(device)
             # prevnet = torch.nn.DataParallel(prevnet)
-            checkpoint = torch.load(f'./checkpoint/main_{cycle-1}.pth')
+            checkpoint = torch.load(f'./checkpoint_seg/main_{cycle-1}.pth')
             net.load_state_dict(checkpoint['net'])
 
             # sampling
-            sample1k = get_plabels2(net, samples, cycle)
+            sample100 = get_seg_plabels_confidence(net, samples, cycle)
         else:
             # first iteration: sample 1k at even intervals
             samples = np.array(samples)
-            sample1k = samples[[j*5 for j in range(1000)]]
+            sample100 = samples[[int(j*2.7) for j in range(100)]]
         # add 1k samples to labeled set
-        labeled.extend(sample1k)
+        labeled.extend(sample100)
         print(f'>> Labeled length: {len(labeled)}')
-        trainset = Loader2(is_train=True, transform=transform_train, path_list=labeled)
-        trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=2)
-
+        trainset = ActiveCityscapes(cityspace_dir,transform=image_transform, target_transform=target_transform,image_files=labeled)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=1, shuffle=True, num_workers=2)
+        scaler = torch.cuda.amp.GradScaler()
+        wandb.log({f"{cycle}/loss"})
         for epoch in range(200):
             train(net, criterion, optimizer, epoch, trainloader)
             test(net, criterion, epoch, cycle)
             scheduler.step()
-        with open(f'./main_best.txt', 'a') as f:
+        with open(f'./main_segment_best.txt', 'a') as f:
             f.write(str(cycle) + ' ' + str(best_acc)+'\n')

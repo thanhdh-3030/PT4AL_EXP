@@ -15,7 +15,7 @@ import numpy as np
 
 from models import *
 from loader import Loader, RotationLoader
-from utils import progress_bar
+from utils.utils import progress_bar
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 best_acc = 0  # best test accuracy
@@ -76,7 +76,7 @@ def test(epoch):
                          % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
 if __name__ == "__main__":
-    test(1)
+    # test(1)
     with open('./rotation_loss.txt', 'r') as f:
         losses = f.readlines()
 
@@ -84,11 +84,11 @@ if __name__ == "__main__":
     name_2 = []
 
     for j in losses:
-        loss_1.append(j[:-1].split('_')[0])
+        loss_1.append(float(j[:-1].split('_')[0]))
         name_2.append(j[:-1].split('_')[1])
 
     s = np.array(loss_1)
-    sort_index = np.argsort(s)
+    sort_index = np.argsort(s)[::-1]
     x = sort_index.tolist()
     x.reverse()
     sort_index = np.array(x) # convert to high loss first

@@ -9,5 +9,5 @@
 /loss
 /DATA
 /models/__pycache__
-data/
-wandb/
+/wandb
+/data

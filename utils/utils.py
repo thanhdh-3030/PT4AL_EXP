@@ -12,7 +12,8 @@ import torch.nn as nn
 import torch.nn.init as init
 
 from torch.nn import init
-
+from torch.autograd import Variable
+from models.loss import CrossEntropy2d
 
 ### initalize the module
 def init_weights(net, init_type='normal'):
@@ -148,3 +149,14 @@ def format_time(seconds):
     if f == '':
         f = '0ms'
     return f
+def loss_calc(pred, label, gpu):
+    """
+    This function returns cross entropy loss for semantic segmentation
+    """
+    # out shape batch_size x channels x h x w -> batch_size x channels x h x w
+    # label shape h x w x 1 x batch_size  -> batch_size x 1 x h x w
+    # label = Variable(label.long()).cuda(gpu)
+    label = Variable(label.long().squeeze(0)).cuda(gpu)
+    criterion = CrossEntropy2d().cuda(gpu)
+
+    return criterion(pred, label)

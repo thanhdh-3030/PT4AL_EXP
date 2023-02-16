@@ -1,4 +1,3 @@
-*.txt
 *.png
 *.pth
 /checkpoint
@@ -11,3 +10,4 @@
 /models/__pycache__
 /wandb
 /data
+*/__pycache__*

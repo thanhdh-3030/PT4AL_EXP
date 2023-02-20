@@ -256,7 +256,7 @@ class transform_tr(object):
         if args.multi_scale is None:
             self.composed_transforms = transforms.Compose([
                 FixedResize(resize=args.resize),
-                # RandomCrop(crop_size=args.crop_size),
+                RandomCrop(crop_size=args.crop_size),
                 # tr.RandomScaleCrop(base_size=self.args.base_size, crop_size=self.args.crop_size, fill=255),
                 # tr.RandomGaussianBlur(),
                 Normalize(mean, std),

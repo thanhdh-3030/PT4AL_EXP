@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.utils.data.sampler import SubsetRandomSampler
 from packaging import version
-
+import numpy as np
 import torchvision
 import torchvision.transforms as transforms
 
@@ -20,11 +20,12 @@ from utils.utils import progress_bar
 # from torchvision.datasets import Cityscapes
 from dataloaders.datasets.cityscapes import CityscapesSegmentation
 from models.deeplabv1 import DeepLabV1
-from utils.utils import loss_calc
+# from utils.utils import loss_calc
+from utils.calculate_weights import calculate_weigths_labels
 import wandb
 from utils.metrics import Evaluator
 from utils.lr_scheduler import LR_Scheduler
-
+from models.loss import SegmentationLosses
 random.seed(0)
 torch.manual_seed(0)
 
@@ -32,8 +33,8 @@ torch.manual_seed(0)
 # WANDB_HOST = "https://api.wandb.ai"
 # os.environ["WANDB_API_KEY"] = WANDB_KEY
 # os.environ["WANDB_BASE_URL"] = WANDB_HOST
-experiment_name='DeepLab v1 with 600 random sample'
-# wandb.init(project="Active Learning", name=experiment_name)
+experiment_name='DeepLab v1 weight classed random crop'
+wandb.init(project="Active Learning", name=experiment_name)
 
 # wandb.login()
 
@@ -49,7 +50,7 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 CITYSCAPES_DIR='/home/dang.hong.thanh/datasets/Cityspaces'
 LEARNING_RATE = 0.025
 MOMENTUM=0.9
-EPOCH=150
+EPOCH=200
 # Data
 print('==> Preparing data..')
 # transform_train = transforms.Compose([
@@ -75,18 +76,23 @@ parser = argparse.ArgumentParser()
 args = parser.parse_args()
 args.resize = 512
 args.base_size = 512
-args.crop_size = 512
+args.crop_size = 321
 args.multi_scale= None
 args.resume=False
+args.cuda=True
+args.loss_type='ce'
+args.use_balanced_weights=True
+args.resume=True
 val_dataset=CityscapesSegmentation(args,root=CITYSCAPES_DIR,split='val')
-testloader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2,drop_last=False)
+testloader = torch.utils.data.DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=2,drop_last=False)
 
 indices = list(range(2975))
 random.shuffle(indices)
 labeled_set = indices[:600]
 # trainset=Cityscapes(root=CITYSCAPES_DIR, split="train",mode="fine",target_type='semantic',transform=image_transform,target_transform=target_transform)
 train_dataset=CityscapesSegmentation(args,root=CITYSCAPES_DIR,split='train')
-trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, num_workers=2, sampler=SubsetRandomSampler(labeled_set))
+# trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=2, num_workers=2, sampler=SubsetRandomSampler(labeled_set))
+trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=4, num_workers=2)
 
 # trainset = Loader(is_train=True, transform=transform_train)
 # trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, num_workers=2, sampler=SubsetRandomSampler(labeled_set))
@@ -101,29 +107,42 @@ trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, num_worke
 print('==> Building model..')
 # net = ResNet18()
 # net = net.to(device)
+if args.use_balanced_weights:
+    class_weights_path=os.path.join(CITYSCAPES_DIR,'Cityscapes_classes_weights.npy')
+    if os.path.isfile(class_weights_path):
+        weight=np.load(class_weights_path)
+    else:
+        weight=calculate_weigths_labels(trainloader,num_classes=19)
+    weight = torch.from_numpy(weight.astype(np.float32))
 net=DeepLabV1(n_classes=19, n_blocks=[3, 4, 23, 3])
 net = net.to(device)
 if version.parse(torch.__version__) >= version.parse('0.4.0'):
-    interp = nn.Upsample(size=(args.base_size, args.base_size*2), mode='bilinear', align_corners=True)
+    # interp = nn.Upsample(size=(args.base_size, args.base_size*2), mode='bilinear', align_corners=True)
+    train_interp = nn.Upsample(size=(args.crop_size, args.crop_size), mode='bilinear', align_corners=True)
+    val_interp = nn.Upsample(size=(args.crop_size, args.crop_size*2), mode='bilinear', align_corners=True)
+
 else:
-    interp = nn.Upsample(size=(args.base_size, args.base_size*2), mode='bilinear')
+    # interp = nn.Upsample(size=(args.base_size, args.base_size*2), mode='bilinear')
+    interp = nn.Upsample(size=(args.crop_size, args.crop_size), mode='bilinear')
+
 # if device == 'cuda':
 #     net = torch.nn.DataParallel(net)
 #     cudnn.benchmark = True
+optimizer = optim.SGD(net.parameters(), lr=LEARNING_RATE,momentum=MOMENTUM, weight_decay=5e-4)
 
 if args.resume:
     # Load checkpoint.
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
-    checkpoint = torch.load('./checkpoint_seg/ckpt_seg_83.06129961013794.pth')
+    checkpoint = torch.load('./checkpoint/ckpt.pth')
     net.load_state_dict(checkpoint['net'])
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
-
+    optimizer.load_state_dict(checkpoint['optimizer'])
 # criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=LEARNING_RATE,momentum=MOMENTUM, weight_decay=5e-4)
 # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[160])
 scheduler=LR_Scheduler(mode='cos',base_lr=LEARNING_RATE,num_epochs=EPOCH,iters_per_epoch=len(train_dataset)/2,min_lr=0.001)
+criterion = SegmentationLosses(weight=weight, cuda=args.cuda).build_loss(mode=args.loss_type)
 # Training
 def train(epoch):
     print('\nEpoch: %d' % epoch)
@@ -140,14 +159,15 @@ def train(epoch):
         outputs = net(inputs)
         # outputs=F.normalize(outputs,dim=1)
         # outputs=F.softmax(outputs,dim=1)
-        outputs=interp(outputs)
+        outputs=train_interp(outputs)
         # print(targets.min(),targets.max())
-        loss = loss_calc(outputs, targets,gpu='cuda:0')
-        # loss.backward()
-        scaler.scale(loss).backward()
-        # optimizer.step()
-        scaler.step(optimizer)
-        scaler.update()
+        # loss = loss_calc(outputs, targets,gpu='cuda:0')
+        loss=criterion(outputs,targets)
+        loss.backward()
+        # scaler.scale(loss).backward()
+        optimizer.step()
+        # scaler.step(optimizer)
+        # scaler.update()
         train_loss += loss.item()
         _, predicted = outputs.max(1)
         # total += targets.size(0)
@@ -188,9 +208,9 @@ def valid(epoch):
             inputs,targets=samples['image'],samples['label']
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
-            outputs=interp(outputs)
+            outputs=val_interp(outputs)
         # print(targets.min(),targets.max())
-            loss = loss_calc(outputs, targets,gpu='cuda:0')
+            loss=criterion(outputs,targets)
             # loss = criterion(outputs, targets)
 
             test_loss += loss.item()
@@ -226,6 +246,7 @@ def valid(epoch):
             'net': net.state_dict(),
             'acc': acc,
             'epoch': epoch,
+            'optimizer':optimizer.state_dict()
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
@@ -234,10 +255,10 @@ def valid(epoch):
 
         
 if __name__ == '__main__':
-    scaler = torch.cuda.amp.GradScaler()
+    # scaler = torch.cuda.amp.GradScaler()
     val_evaluator = Evaluator(num_class=19)
     train_evaluator=Evaluator(num_class=19)
-    for epoch in range(start_epoch, start_epoch+200):
+    for epoch in range(start_epoch, start_epoch+EPOCH):
         train(epoch)
         valid(epoch)
         # scheduler.step()

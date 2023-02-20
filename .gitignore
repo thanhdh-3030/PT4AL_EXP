@@ -11,3 +11,4 @@
 /wandb
 /data
 /utils/__pycache__/
+*.pyc

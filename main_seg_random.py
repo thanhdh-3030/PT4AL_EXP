@@ -26,6 +26,8 @@ import wandb
 from utils.metrics import Evaluator
 from utils.lr_scheduler import LR_Scheduler
 from models.loss import SegmentationLosses
+from mmseg.core.evaluation.metrics import intersect_and_union
+from mmseg.core import pre_eval_to_metrics
 
 from mmseg.models.builder import build_segmentor
 norm_cfg = dict(type='BN', requires_grad=True)
@@ -93,9 +95,10 @@ parser.add_argument('--resume', '-r', action='store_true',
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-best_acc = 0  # best test accuracy
+# best_acc = 0  # best test accuracy
+best_miou=0
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
-CITYSCAPES_DIR='/home/dang.hong.thanh/datasets/Cityspaces'
+CITYSCAPES_DIR='/home/shared/Cityscapes/'
 LEARNING_RATE = 2.5*1e-3
 MOMENTUM=0.9
 EPOCH=200
@@ -188,7 +191,8 @@ if args.resume:
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('./checkpoint/ckpt.pth')
     net.load_state_dict(checkpoint['net'])
-    best_acc = checkpoint['acc']
+    # best_acc = checkpoint['acc']
+    best_miou=checkpoint['best_miou']
     start_epoch = checkpoint['epoch']
     optimizer.load_state_dict(checkpoint['optimizer'])
 # criterion = nn.CrossEntropyLoss()
@@ -202,14 +206,14 @@ def train(epoch):
     train_loss = 0
     correct = 0
     total = 0
-    train_evaluator.reset()
-    for batch_idx, samples in enumerate(trainloader):
-        inputs,targets=samples['image'],samples['label']
+    # train_evaluator.reset()
+    for batch_idx, results in enumerate(trainloader):
+        inputs,targets=results['img'],results['gt_semantic_seg']
         inputs, targets = inputs.to(device), targets.to(device)
 
-        maxs,_=torch.topk(torch.unique(targets.flatten()),k=2)
-        print(maxs[1].min())
-        scheduler(optimizer, batch_idx, epoch, best_acc)
+        # maxs,_=torch.topk(torch.unique(targets.flatten()),k=2)
+        # print(maxs[1].min())
+        scheduler(optimizer, batch_idx, epoch, best_miou)
         optimizer.zero_grad()
         outputs = net(inputs)
         # outputs=F.normalize(outputs,dim=1)
@@ -236,19 +240,19 @@ def train(epoch):
                      % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
         # if batch_idx==2: break
                     # Add batch sample into evaluator
-        preds = torch.argmax(outputs, axis=1)
-        train_evaluator.add_batch(targets.cpu().numpy(),preds.data.cpu().numpy())
+        # preds = torch.argmax(outputs, axis=1)
+        # train_evaluator.add_batch(targets.cpu().numpy(),preds.data.cpu().numpy())
 
-    Acc = train_evaluator.Pixel_Accuracy()
-    Acc_class = train_evaluator.Pixel_Accuracy_Class()
-    mIoU = train_evaluator.Mean_Intersection_over_Union()
-    FWIoU = train_evaluator.Frequency_Weighted_Intersection_over_Union()   
+    # Acc = train_evaluator.Pixel_Accuracy()
+    # Acc_class = train_evaluator.Pixel_Accuracy_Class()
+    # mIoU = train_evaluator.Mean_Intersection_over_Union()
+    # FWIoU = train_evaluator.Frequency_Weighted_Intersection_over_Union()   
     wandb.log({'train/loss': train_loss/len(trainloader),
                 'train/acc':correct/total,
-                'train/mIOU':mIoU,
-                'train/Acc':Acc,
-                'train/Acc_class':Acc_class,
-                'train/fwIoU':FWIoU,
+                # 'train/mIOU':mIoU,
+                # 'train/Acc':Acc,
+                # 'train/Acc_class':Acc_class,
+                # 'train/fwIoU':FWIoU,
                 'train/lr':optimizer.param_groups[0]['lr']},step=epoch)
 def valid(epoch):
     global best_acc
@@ -256,11 +260,11 @@ def valid(epoch):
     test_loss = 0
     correct = 0
     total = 0
-    val_evaluator.reset()
-
+    # val_evaluator.reset()
+    pre_eval_results = []
     with torch.no_grad():
-        for batch_idx, samples in enumerate(testloader):
-            inputs,targets=samples['image'],samples['label']
+        for batch_idx, results in enumerate(testloader):
+            inputs,targets=results['img'],results['gt_semantic_seg']
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
             outputs=val_interp(outputs)
@@ -279,40 +283,53 @@ def valid(epoch):
                          % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
             
             # Add batch sample into evaluator
-            preds = torch.argmax(outputs, axis=1)
-            val_evaluator.add_batch(targets.cpu().numpy(),preds.data.cpu().numpy())
+            # preds = torch.argmax(outputs, axis=1)
+            # val_evaluator.add_batch(targets.cpu().numpy(),preds.data.cpu().numpy())
+            _, predicted = outputs.max(1)
+            pred=predicted.squeeze(0).cpu().numpy()
+            seg_map=targets.squeeze(0).cpu().numpy()
+            pre_eval_result=intersect_and_union(pred,seg_map,num_classes=19,ignore_index=255,label_map=dict(),reduce_zero_label=False)
+            pre_eval_results.append(pre_eval_result)
 
     # Fast test during the training
-    Acc = val_evaluator.Pixel_Accuracy()
-    Acc_class = val_evaluator.Pixel_Accuracy_Class()
-    mIoU = val_evaluator.Mean_Intersection_over_Union()
-    FWIoU = val_evaluator.Frequency_Weighted_Intersection_over_Union()
+    # Acc = val_evaluator.Pixel_Accuracy()
+    # Acc_class = val_evaluator.Pixel_Accuracy_Class()
+    # mIoU = val_evaluator.Mean_Intersection_over_Union()
+    # FWIoU = val_evaluator.Frequency_Weighted_Intersection_over_Union()
+    ret_metrics=pre_eval_to_metrics(pre_eval_results,metrics=['mIoU','mDice'])
+    mIoU=ret_metrics['IoU'].mean()
+    mDice=ret_metrics['Dice'].mean()
+    Acc=ret_metrics['Acc']
     wandb.log({'val/loss': test_loss/len(testloader),
                 'val/acc':correct/total,
-                'val/mIOU':mIoU,
+                # 'val/mIOU':mIoU,
+                # 'val/Acc':Acc,
+                # 'val/Acc_class':Acc_class,
+                # 'val/fwIoU':FWIoU,
                 'val/Acc':Acc,
-                'val/Acc_class':Acc_class,
-                'val/fwIoU':FWIoU},step=epoch)
+                'val/mIoU':mIoU,
+                'val/mDice':mDice,
+                },step=epoch)
     # Save checkpoint.
-    acc = 100.*correct/total
-    if acc > best_acc:
+    # acc = 100.*correct/total
+    if mIoU > best_miou:
         print('Saving..')
         state = {
             'net': net.state_dict(),
-            'acc': acc,
+            'acc': mIoU,
             'epoch': epoch,
             'optimizer':optimizer.state_dict()
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/ckpt.pth')
-        best_acc = acc
+        torch.save(state, './checkpoint/{.6f}ckpt.pth'.format(mIoU))
+        best_miou = mIoU
 
         
 if __name__ == '__main__':
     # scaler = torch.cuda.amp.GradScaler()
-    val_evaluator = Evaluator(num_class=19)
-    train_evaluator=Evaluator(num_class=19)
+    # val_evaluator = Evaluator(num_class=19)
+    # train_evaluator=Evaluator(num_class=19)
     for epoch in range(start_epoch, start_epoch+EPOCH):
         train(epoch)
         valid(epoch)

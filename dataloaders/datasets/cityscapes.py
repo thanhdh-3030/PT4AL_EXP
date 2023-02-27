@@ -4,8 +4,8 @@ import numpy as np
 from PIL import Image
 # from mypath import Path
 from torch.utils import data
-from dataloaders import custom_transforms as tr
-
+# from dataloaders import custom_transforms as tr
+from dataloaders import mmtransforms as mmtr
 
 # def twoTrainSeg(args, root=Path.db_root_dir('cityscapes')):
 #     images_base = os.path.join(root, 'leftImg8bit', 'train')
@@ -81,11 +81,13 @@ class CityscapesSegmentation(data.Dataset):
         _img = Image.open(img_path).convert('RGB')
         _tmp = np.array(Image.open(lbl_path), dtype=np.uint8)
         _tmp = self.encode_segmap(_tmp)
-        _target = Image.fromarray(_tmp)
+        # _target = Image.fromarray(_tmp)
 
-        sample = {'image': _img, 'label': _target}
-        return sample
-        # return self.transform(sample)
+        results = {'img': np.array(_img),
+                  'gt_semantic_seg': _tmp,
+                  'seg_fields':['gt_semantic_seg']}
+        return self.transform(results)
+        # return results
 
     def encode_segmap(self, mask):
         # Put all void classes to zero
@@ -106,15 +108,16 @@ class CityscapesSegmentation(data.Dataset):
 
     def get_transform(self):
         if self.split == 'train':
-            return tr.transform_tr(self.args, self.mean, self.std)
+            # return tr.transform_tr(self.args, self.mean, self.std)
+            return mmtr.transform_tr(self.args)
         elif self.split == 'val':
-            return tr.transform_val(self.args, self.mean, self.std)
-        elif self.split == 'test':
-            return tr.transform_ts(self.args, self.mean, self.std)
-        elif self.split == 'retrain':
-            return tr.transform_retr(self.args, self.mean, self.std)
-        elif self.split == 'reval':
-            return tr.transform_reval(self.args, self.mean, self.std)
+            return mmtr.transform_val(self.args)
+        # elif self.split == 'test':
+        #     return tr.transform_ts(self.args, self.mean, self.std)
+        # elif self.split == 'retrain':
+        #     return tr.transform_retr(self.args, self.mean, self.std)
+        # elif self.split == 'reval':
+        #     return tr.transform_reval(self.args, self.mean, self.std)
 
 class ActiveCityscapesSegmentation(data.Dataset):
     NUM_CLASSES = 19
@@ -180,9 +183,9 @@ class ActiveCityscapesSegmentation(data.Dataset):
         _tmp = self.encode_segmap(_tmp)
         _target = Image.fromarray(_tmp)
 
-        sample = {'image': _img, 'label': _target}
-        return self.transform(sample)
-
+        sample = {'img': _img, 'gt_semantic_seg': _target}
+        # return self.transform(sample)
+        return sample
     def encode_segmap(self, mask):
         # Put all void classes to zero
         for _voidc in self.void_classes:

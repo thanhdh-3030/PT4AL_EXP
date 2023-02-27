@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import confusion_matrix
+# from sklearn.metrics import confusion_matrix
 
 # class SegmentationMetrics(object):
 #     r"""Calculate common metrics in semantic segmentation to evalueate model preformance.

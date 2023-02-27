@@ -23,7 +23,7 @@ def calculate_weigths_labels(dataloader, num_classes):
         class_weight = 1 / (np.log(1.02 + (frequency / total_frequency)))
         class_weights.append(class_weight)
     ret = np.array(class_weights)
-    classes_weights_path = os.path.join('/home/dang.hong.thanh/datasets/Cityspaces', 'Cityscapes_classes_weights.npy')
+    classes_weights_path = os.path.join('/home/dang.hong.thanh/datasets/Cityspaces', 'Cityscapes_classes_weights_all.npy')
     np.save(classes_weights_path, ret)
 
     return ret

@@ -21,13 +21,60 @@ from models import *
 from loader import Loader, Loader2
 from utils.utils import progress_bar
 # from torchvision.datasets import Cityscapes
-from models.deeplabv1 import DeepLabV1
+# from models.deeplabv1 import DeepLabV1
 # from utils.utils import loss_calc
 from dataloaders.datasets.cityscapes import CityscapesSegmentation,ActiveCityscapesSegmentation
 from models.loss import SegmentationLosses
 from utils.lr_scheduler import LR_Scheduler
 from utils.calculate_weights import calculate_weigths_labels
 import wandb
+from mmseg.models.builder import build_segmentor
+norm_cfg = dict(type='BN', requires_grad=True)
+model_cfg = dict(
+    type='SunSegmentor',
+    
+    backbone=dict(
+        type='ResNetV1c',
+        pretrained='open-mmlab://resnet18_v1c',
+        depth=18,
+        num_stages=4,
+        out_indices=(0, 1, 2, 3),
+        dilations=(1, 1, 2, 4),
+        strides=(1, 2, 1, 1),
+        norm_cfg=norm_cfg,
+        norm_eval=False,
+        style='pytorch',
+        contract_dilation=True),
+    decode_head=dict(
+        type='PSPHead',
+        in_channels=512,
+        in_index=3,
+        channels=128,
+        pool_scales=(1, 2, 3, 6),
+        dropout_ratio=0.1,
+        num_classes=19,
+        norm_cfg=norm_cfg,
+        align_corners=True,
+        loss_decode=dict(
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0)),
+    # auxiliary_head=dict(
+    #     type='FCNHead',
+    #     in_channels=1024,
+    #     in_index=2,
+    #     channels=256,
+    #     num_convs=1,
+    #     concat_input=False,
+    #     dropout_ratio=0.1,
+    #     num_classes=19,
+    #     norm_cfg=norm_cfg,
+    #     align_corners=True,
+    #     loss_decode=dict(
+    #         type='CrossEntropyLoss', use_sigmoid=False, loss_weight=0.4)),
+    # model training and testing settings
+    train_cfg=dict(),
+    # test_cfg=dict(mode='slide', crop_size=(769, 769), stride=(513, 513))
+    # test_cfg=None
+    )
 random.seed(0)
 torch.manual_seed(0)
 # train_dir_img = Path('./DATA/train/')
@@ -42,7 +89,7 @@ parser = argparse.ArgumentParser(description='PyTorch Cityscapes Training')
 # parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 # parser.add_argument('--resume', '-r', action='store_true',
 #                     help='resume from checkpoint')
-experiment_name='DeepLab v1 AL'
+experiment_name='PSP r18 AL'
 # wandb.init(project="Active Learning", name=experiment_name)
 
 args = parser.parse_args()
@@ -108,7 +155,10 @@ testloader=torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuff
 # Model
 print('==> Building model..')
 # net = ResNet18()
-net=DeepLabV1(n_classes=19, n_blocks=[3, 4, 23, 3])
+# net=DeepLabV1(n_classes=19, n_blocks=[3, 4, 23, 3])
+# net = net.to(device)
+net = build_segmentor(model_cfg)
+net.init_weights()
 net = net.to(device)
 if args.use_balanced_weights:
     class_weights_path=os.path.join(CITYSCAPES_DIR,'Cityscapes_classes_weights.npy')
@@ -149,7 +199,7 @@ def train(net, criterion, optimizer, epoch, trainloader):
         outputs = net(inputs)
         # outputs=F.normalize(outputs,dim=1)
         # outputs=F.softmax(outputs,dim=1)
-        outputs=train_interp(outputs)
+        outputs=val_interp(outputs)
         # print(targets.min(),targets.max())
         # loss = loss_calc(outputs, targets,gpu='cuda:0')
         loss=criterion(outputs,targets)
@@ -187,7 +237,7 @@ def train(net, criterion, optimizer, epoch, trainloader):
     #             f'{cycle}/train/lr':optimizer.param_groups[0]['lr']},step=epoch)
 
 def test(net, criterion, epoch, cycle):
-    global best_acc
+    global best_Acc,best_mIoU
     net.eval()
     test_loss = 0
     correct = 0
@@ -219,10 +269,10 @@ def test(net, criterion, epoch, cycle):
             val_evaluator.add_batch(targets.cpu().numpy(),preds.data.cpu().numpy())
 
     # Fast test during the training
-    # Acc = val_evaluator.Pixel_Accuracy()
-    # Acc_class = val_evaluator.Pixel_Accuracy_Class()
-    # mIoU = val_evaluator.Mean_Intersection_over_Union()
-    # FWIoU = val_evaluator.Frequency_Weighted_Intersection_over_Union()
+    Acc = val_evaluator.Pixel_Accuracy()
+    Acc_class = val_evaluator.Pixel_Accuracy_Class()
+    mIoU = val_evaluator.Mean_Intersection_over_Union()
+    FWIoU = val_evaluator.Frequency_Weighted_Intersection_over_Union()
     # wandb.log({f'{cycle}/val/loss': test_loss/len(testloader),
     #             f'{cycle}/val/acc':correct/total,
     #             f'{cycle}/val/mIOU':mIoU,
@@ -231,19 +281,20 @@ def test(net, criterion, epoch, cycle):
     #             f'{cycle}/val/fwIoU':FWIoU},step=epoch)
  
     # Save checkpoint.
-    acc = 100.*correct/total
-    if acc > best_acc:
+    # acc = 100.*correct/total
+    # miou=Acc*100
+    if mIoU > best_mIoU:
         print('Saving..')
         state = {
             'net': net.state_dict(),
-            'acc': acc,
+            'acc': mIoU,
             'epoch': epoch,
             'optimizer':optimizer.state_dict()
         }
         if not os.path.isdir('checkpoint_seg'):
             os.mkdir('checkpoint_seg')
         torch.save(state, f'./checkpoint_seg/main_{cycle}.pth')
-        best_acc = acc
+        best_mIoU = mIoU
 
 # class-balanced sampling (pseudo labeling)
 # def get_plabels(net, samples, cycle):
@@ -315,21 +366,22 @@ def get_seg_plabels_confidence(net, samples, cycle):
     # class_dict = {}
     # [class_dict.setdefault(x,[]) for x in range(10)]
 
-    sample1k = []
+    # sample1k = []
     subset = ActiveCityscapesSegmentation(args,CITYSCAPES_DIR,split='train',files=samples)
 
-    ploader = torch.utils.data.DataLoader(subset, batch_size=1, shuffle=False, num_workers=2)
+    ploader = torch.utils.data.DataLoader(subset, batch_size=1, shuffle=False, num_workers=2,drop_last=False)
 
     uncertainty_scores = []
     net.eval()
     with torch.no_grad():
-        for idx, (inputs, targets) in enumerate(ploader):
+        for idx, samples in enumerate(ploader):
+            inputs,targets=samples['image'],samples['label']
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
             outputs=interp(outputs)
             # scores, predicted = outputs.max(1)
             # save top1 confidence score 
-            outputs = F.normalize(outputs, dim=1)
+            # outputs = F.normalize(outputs, dim=1)
             probs = F.softmax(outputs, dim=1)
             # top1_scores.append(probs[0][predicted.item()])
             # top1_scores.append(probs[0][predicted.item()].cpu().item())
@@ -337,15 +389,16 @@ def get_seg_plabels_confidence(net, samples, cycle):
             # # print(outputs.size())
             # print(max_probs)
             # print(indices)
-            measures=torch.logical_and(probs>=0.35,probs<=0.75)
-    
-            uncertainty_score=torch.sum(measures,dim=(1,2,3))
+            # measures=torch.logical_and(probs>=0.35,probs<=0.75)
+            best_probs,_=torch.max(probs,dim=1)
+            measures=torch.lt(best_probs,0.5)    
+            uncertainty_score=torch.sum(measures,dim=(-1,-2))
             # print(uncertainty_score)
             uncertainty_scores.append(uncertainty_score.cpu().item())
             # progress_bar(idx, len(ploader))
     idx = np.argsort(uncertainty_scores)
     samples = np.array(samples)
-    return samples[idx[:100]]
+    return samples[idx[:-100]]
 # entropy sampling
 # def get_plabels3(net, samples, cycle):
 #     sample1k = []
@@ -383,6 +436,7 @@ if __name__ == '__main__':
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[160])
 
         best_acc = 0
+        best_mIoU=0
         print('Cycle ', cycle)
 
         # open 5k batch (sorted low->high)
@@ -417,5 +471,6 @@ if __name__ == '__main__':
             train(net, criterion, optimizer, epoch, trainloader)
             test(net, criterion, epoch, cycle)
             # scheduler.step()
+        wandb.log({'Pixel Accuracy':best_acc,'mIoU':best_mIoU},step=cycle)
         with open(f'./main_segment_best.txt', 'a') as f:
-            f.write(str(cycle) + ' ' + str(best_acc)+'\n')
+            f.write(str(cycle) + ' ' +str(best_mIoU)+' '+ str(best_acc)+'\n')

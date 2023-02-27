@@ -84,7 +84,8 @@ class CityscapesSegmentation(data.Dataset):
         _target = Image.fromarray(_tmp)
 
         sample = {'image': _img, 'label': _target}
-        return self.transform(sample)
+        return sample
+        # return self.transform(sample)
 
     def encode_segmap(self, mask):
         # Put all void classes to zero
